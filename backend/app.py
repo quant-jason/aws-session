@@ -6,6 +6,7 @@ This application provides CRUD operations for todos, system logging, and databas
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 import psycopg2
 from psycopg2.extras import RealDictCursor
@@ -16,6 +17,10 @@ from datetime import datetime
 from typing import List, Optional
 import json
 
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+
 # Configure logging for the application
 logging.basicConfig(
     level=logging.INFO,
@@ -23,22 +28,32 @@ logging.basicConfig(
 )
 logger = logging.getLogger("TodoAPI")
 
+# Rate Limiter 설정
+limiter = Limiter(key_func=get_remote_address)
+
 # Initialize FastAPI application
 app = FastAPI(
-    title="Todo API", 
+    title="Todo API",
     description="Docker Todo App with FastAPI - A comprehensive todo management system",
     version="1.0.0",
     docs_url="/docs",
     redoc_url="/redoc"
 )
 
+# Rate Limiter를 앱에 연결
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+# CORS 허용 출처 설정 (환경변수로 관리)
+ALLOWED_ORIGINS = os.environ.get('ALLOWED_ORIGINS', 'http://localhost:8080,http://localhost:3000').split(',')
+
 # Configure CORS middleware to allow frontend communication
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, specify exact origins
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization", "X-Requested-With"],
 )
 
 # Global list to store system request logs (in-memory storage)
@@ -195,7 +210,8 @@ def init_db():
         print(f"데이터베이스 초기화 오류: {e}")
 
 @app.get("/health")
-def health_check():
+@limiter.limit("60/minute")
+def health_check(request: Request):
     """Health check endpoint for container orchestration.
     
     Returns basic service status and timestamp for monitoring purposes.
@@ -211,7 +227,8 @@ def health_check():
     return {"status": "ok", "service": "backend", "timestamp": datetime.now().isoformat()}
 
 @app.get("/api/logs")
-def get_system_logs():
+@limiter.limit("60/minute")
+def get_system_logs(request: Request):
     """Retrieve system request logs for monitoring.
     
     Returns the last 50 HTTP request logs captured by the middleware.
@@ -226,7 +243,8 @@ def get_system_logs():
     return {"logs": system_logs[-50:], "total_requests": len(system_logs)}
 
 @app.get("/api/database/structure")
-def get_database_structure():
+@limiter.limit("60/minute")
+def get_database_structure(request: Request):
     """Inspect database schema and sample data.
     
     Provides detailed information about the todos table structure,
@@ -281,7 +299,8 @@ def get_database_structure():
         raise HTTPException(status_code=500, detail=f"데이터베이스 구조 조회 실패: {str(e)}")
 
 @app.get("/api/todos", response_model=List[TodoResponse])
-def get_todos():
+@limiter.limit("60/minute")
+def get_todos(request: Request):
     """Retrieve all todo items from the database.
     
     Fetches all todos ordered by creation date (newest first).
@@ -312,7 +331,8 @@ def get_todos():
         raise HTTPException(status_code=500, detail=f"할 일 목록 조회 실패: {str(e)}")
 
 @app.post("/api/todos", response_model=TodoResponse, status_code=201)
-def create_todo(todo: TodoCreate):
+@limiter.limit("30/minute")
+def create_todo(request: Request, todo: TodoCreate):
     """Create a new todo item.
     
     Validates input data and creates a new todo in the database.
@@ -370,7 +390,8 @@ def create_todo(todo: TodoCreate):
         raise HTTPException(status_code=500, detail=f"할 일 추가 실패: {str(e)}")
 
 @app.put("/api/todos/{todo_id}/toggle", response_model=TodoResponse)
-def toggle_todo(todo_id: int):
+@limiter.limit("30/minute")
+def toggle_todo(request: Request, todo_id: int):
     """Toggle the completion status of a todo item.
     
     Switches a todo between completed and pending states.
@@ -418,7 +439,8 @@ def toggle_todo(todo_id: int):
         raise HTTPException(status_code=500, detail=f"상태 변경 실패: {str(e)}")
 
 @app.delete("/api/todos/{todo_id}", status_code=204)
-def delete_todo(todo_id: int):
+@limiter.limit("30/minute")
+def delete_todo(request: Request, todo_id: int):
     """Delete a todo item permanently.
     
     Removes a todo from the database completely. This action cannot be undone.
@@ -460,7 +482,8 @@ def delete_todo(todo_id: int):
         raise HTTPException(status_code=500, detail=f"삭제 실패: {str(e)}")
 
 @app.get("/api/todos/stats")
-def get_todo_stats():
+@limiter.limit("60/minute")
+def get_todo_stats(request: Request):
     """Get comprehensive statistics about todos.
     
     Provides detailed statistics including:
